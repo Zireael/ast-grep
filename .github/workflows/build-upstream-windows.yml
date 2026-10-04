@@ -1,0 +1,150 @@
+name: Build upstream main (Windows x64)
+
+# Manual, owner-triggered only. This fork never builds its own sources: the job
+# checks out ast-grep/ast-grep at the requested ref and compiles that instead.
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 'Ref on ast-grep/ast-grep to build (default: main)'
+        required: false
+        default: 'main'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-upstream-windows-x64
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ast-grep (x86_64-pc-windows-msvc)
+    # Only the fork owner may start a build.
+    if: github.repository == 'Zireael/ast-grep' && github.actor == github.repository_owner
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: upstream
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+      # Matches upstream's release asset name, so binaries stay drop-in
+      # compatible with cargo-binstall's pkg-url for this project.
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - name: Check out upstream ast-grep
+        uses: actions/checkout@v6
+        with:
+          repository: ast-grep/ast-grep
+          ref: ${{ inputs.upstream_ref || 'main' }}
+          path: upstream
+          persist-credentials: false
+
+      - name: Install Rust
+        run: rustup update stable
+
+      - name: Resolve upstream revision
+        id: rev
+        shell: bash
+        run: |
+          sha="$(git rev-parse HEAD)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${sha:0:7}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Upstream build"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Upstream ref | \`${{ inputs.upstream_ref || 'main' }}\` |"
+            echo "| Upstream commit | \`${sha}\` |"
+            echo "| Target | \`${TARGET}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cache cargo registry and build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            upstream/target
+          key: ${{ runner.os }}-${{ env.TARGET }}-${{ steps.rev.outputs.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ env.TARGET }}-
+
+      # -p ast-grep selects only the CLI package, so the napi/pyo3/wasm
+      # workspace members (which need Node, Python and wasm-pack) stay out of
+      # the build. --locked is intentionally not used, matching upstream's
+      # own release build.
+      - name: Build ast-grep CLI
+        run: cargo build --release -p ast-grep --bins
+
+      - name: Smoke test built binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseDir = Join-Path $PWD 'target\release'
+          foreach ($bin in 'ast-grep', 'sg') {
+            $exe = Join-Path $releaseDir "$bin.exe"
+            if (-not (Test-Path $exe)) { throw "missing build output: $exe" }
+            if ((Get-Item $exe).Length -lt 1MB) { throw "$exe is suspiciously small" }
+            $version = & $exe --version
+            if ($LASTEXITCODE -ne 0) { throw "$exe --version exited $LASTEXITCODE" }
+            Write-Host "$bin -> $version"
+          }
+
+          # Functional check: the binary must parse and match, not just print a version.
+          $fixture = Join-Path $env:RUNNER_TEMP 'ast-grep-smoke.js'
+          'const answer = 42; console.log(answer);' | Set-Content -Path $fixture -Encoding utf8
+          $hits = & (Join-Path $releaseDir 'ast-grep.exe') run --lang js --color never -p 'console.log($X)' $fixture
+          if ($LASTEXITCODE -ne 0) { throw "ast-grep run exited $LASTEXITCODE" }
+          if (($hits -join "`n") -notmatch 'console\.log\(answer\)') {
+            throw "pattern did not match, output was: $($hits -join "`n")"
+          }
+          Write-Host 'functional scan OK'
+
+      - name: Package binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseDir = Join-Path $PWD 'target\release'
+          $stage = Join-Path $env:RUNNER_TEMP 'ast-grep-dist'
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+
+          Copy-Item (Join-Path $releaseDir 'ast-grep.exe') $stage
+          # `sg.exe` is a shim that execs `ast-grep.exe`, so both must ship.
+          Copy-Item (Join-Path $releaseDir 'sg.exe') $stage
+          Copy-Item 'LICENSE', 'README.md' $stage
+          Get-ChildItem $stage -Filter '*.exe' | Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } |
+            Set-Content -Path (Join-Path $stage 'checksums.txt') -Encoding utf8
+
+          # sg.exe only resolves ast-grep.exe if the staging dir is on PATH,
+          # which is exactly how the shipped zip is meant to be installed.
+          $env:PATH = "$stage;$env:PATH"
+          $sgVersion = & (Join-Path $stage 'sg.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw "sg.exe shim failed from staging dir: $LASTEXITCODE" }
+          Write-Host "packaged sg -> $sgVersion"
+
+          $zip = Join-Path $env:RUNNER_TEMP "app-$env:TARGET.zip"
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
+          Write-Host "zip: $zip ($((Get-Item $zip).Length) bytes)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ast-grep-${{ env.TARGET }}-${{ steps.rev.outputs.short_sha }}
+          path: ${{ runner.temp }}/app-${{ env.TARGET }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Report result
+        shell: bash
+        run: |
+          {
+            echo "ast-grep ${TARGET} built from upstream ${{ steps.rev.outputs.short_sha }}:"
+            echo "- artifact: \`ast-grep-${TARGET}-${{ steps.rev.outputs.short_sha }}\`"
+            echo "- asset: \`app-${TARGET}.zip\` (ast-grep.exe, sg.exe, LICENSE, README.md, checksums.txt)"
+          } >> "$GITHUB_STEP_SUMMARY"
