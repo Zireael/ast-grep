@@ -1,18 +1,15 @@
 name: "PyPi Release"
 
 on:
+  # Automatic triggers (push / pull_request / schedule / release /
+  # workflow_run / ...) were removed on 2026-10-31. This workflow now
+  # runs only when started by hand: Actions tab -> Run workflow, or
+  # `gh workflow run <file>`.
   workflow_dispatch:
     inputs:
       need_release:
         description: "Select this for publish. If not selected, it will be a dry run (no uploads)."
         type: boolean
-  push:
-    tags:
-      - "[0-9]+.*"
-  schedule:
-    # run pypi every day 9 am
-    - cron: '0 9 * * *'
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
