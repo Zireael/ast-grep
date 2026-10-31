@@ -5,19 +5,16 @@ defaults:
     working-directory: ./crates/wasm
 
 on:
+  # Automatic triggers (push / pull_request / schedule / release /
+  # workflow_run / ...) were removed on 2026-10-31. This workflow now
+  # runs only when started by hand: Actions tab -> Run workflow, or
+  # `gh workflow run <file>`.
   workflow_dispatch:
     inputs:
       need_release:
         description: "Select this for publish. If not selected, it will be a dry run (no uploads)."
         type: boolean
         default: false
-  push:
-    tags:
-      - "[0-9]+.*"
-  schedule:
-    # run wasm every day 9 am
-    - cron: '0 9 * * *'
-
 jobs:
   build:
     name: Build and Test WASM
