@@ -4,14 +4,11 @@ env:
   APP_NAME: ast-grep-napi
   MACOSX_DEPLOYMENT_TARGET: '10.13'
 on:
+  # Automatic triggers (push / pull_request / schedule / release /
+  # workflow_run / ...) were removed on 2026-10-31. This workflow now
+  # runs only when started by hand: Actions tab -> Run workflow, or
+  # `gh workflow run <file>`.
   workflow_dispatch: null
-  push:
-    tags:
-      - "[0-9]+.*"
-  schedule:
-    # run napi every day 9 am
-    - cron: '0 9 * * *'
-
 defaults:
   run:
     working-directory: ./crates/napi
